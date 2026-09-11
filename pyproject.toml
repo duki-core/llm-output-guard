@@ -9,7 +9,7 @@ description = "Multi-layer LLM output protection: system prompt leakage + unauth
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "your name here" }]
+authors = [{ name = "duki-core" }]
 dependencies = []
 
 [project.optional-dependencies]
