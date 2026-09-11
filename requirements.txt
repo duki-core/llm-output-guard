@@ -1,0 +1,9 @@
+# The core library (leak_guard.py, action_gate.py) has no external dependencies.
+# Below is what's needed for the semantic layer and for running the example.
+
+sentence-transformers>=2.2   # optional: enables the semantic layer (layer 2)
+numpy>=1.24                  # optional: needed alongside sentence-transformers
+
+openai>=1.0                  # only for examples/basic_usage.py (any OpenAI-compatible client)
+
+pytest>=7.0                  # for running the tests

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-output-guard"
+version = "0.1.0"
+description = "Multi-layer LLM output protection: system prompt leakage + unauthorized action markers"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "your name here" }]
+dependencies = []
+
+[project.optional-dependencies]
+semantic = ["sentence-transformers>=2.2", "numpy>=1.24"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+include = ["llm_output_guard*"]
