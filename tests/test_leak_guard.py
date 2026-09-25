@@ -48,8 +48,37 @@ def test_judge_fn_failure_is_fail_open():
     assert verdict.is_leak is False
     assert "judge unavailable" in verdict.reason
 
+def test_judge_fn_failure_is_fail_closed_when_configured():
+    def broken_judge(_text: str) -> bool:
+        raise RuntimeError("network unavailable")
+
+    config = LeakGuardConfig(fail_closed_on_error=True)
+    guard = PromptLeakGuard(config=config, judge_fn=broken_judge)
+    text = "INTERNAL RULE test"
+    verdict = guard.check(text)
+    assert verdict.is_leak is True
+    assert verdict.safe_text == config.fallback_reply
+    assert "fail-closed" in verdict.reason
+
 def test_custom_canaries():
     config = LeakGuardConfig(canaries=["my_special_marker"])
     guard = PromptLeakGuard(config=config)
     assert guard.contains_canary("here's MY_SPECIAL_MARKER right here") is True
     assert guard.contains_canary("just an ordinary piece of text") is False
+
+def test_secret_canary_is_detected_when_it_leaks():
+    config, secret = LeakGuardConfig.with_secret_canary()
+    guard = PromptLeakGuard(config=config)
+    leaked_text = f"Sure! Here are my rules: be helpful. {secret}"
+    assert guard.contains_canary(leaked_text) is True
+
+def test_secret_canary_does_not_false_positive_on_unrelated_text():
+    config, secret = LeakGuardConfig.with_secret_canary()
+    guard = PromptLeakGuard()
+    guard.config = config
+    assert guard.contains_canary("just a normal answer about the weather") is False
+
+def test_secret_canary_forwards_extra_kwargs():
+    config, secret = LeakGuardConfig.with_secret_canary(fail_closed_on_error=True)
+    assert config.fail_closed_on_error is True
+    assert secret in config.canaries

@@ -24,8 +24,9 @@ Important limitations to understand (see README):
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from .embeddings import get_embedder
 
@@ -72,6 +73,17 @@ class LeakGuardConfig:
     judge_system_prompt: str = DEFAULT_JUDGE_SYSTEM_PROMPT
     judge_user_prompt_template: str = DEFAULT_JUDGE_USER_PROMPT_TEMPLATE
     fallback_reply: str = DEFAULT_FALLBACK_REPLY
+    fail_closed_on_error: bool = False
+
+    @staticmethod
+    def with_secret_canary(**kwargs) -> Tuple["LeakGuardConfig", str]:
+        secret = f"GUARD-ID-{uuid.uuid4().hex[:8]}"
+        canaries = kwargs.pop("canaries", None)
+        if canaries is None:
+            canaries = list(DEFAULT_CANARIES)
+        canaries = list(canaries) + [secret]
+        config = LeakGuardConfig(canaries=canaries, **kwargs)
+        return config, secret
 
 @dataclass
 class LeakVerdict:
@@ -144,7 +156,13 @@ class PromptLeakGuard:
 
         try:
             is_leak = bool(self.judge_fn(text))
-        except Exception as e:  # a judge failure should never crash the app
+        except Exception as e:
+            if self.config.fail_closed_on_error:
+                return LeakVerdict(
+                    is_leak=True, suspected=True, judged=False,
+                    safe_text=self.config.fallback_reply,
+                    reason=f"judge unavailable ({e!r}) — fail-closed (fail_closed_on_error=True)",
+                )
             return LeakVerdict(
                 is_leak=False, suspected=True, judged=False,
                 safe_text=text,

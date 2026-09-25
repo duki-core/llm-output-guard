@@ -45,6 +45,7 @@ class ActionDefinition:
     name: str
     pattern: re.Pattern
     confirm_keywords: List[str]
+    strict_tokens: bool = False
 
 
 @dataclass
@@ -105,6 +106,8 @@ class ActionGate:
             for m in action.pattern.finditer(model_output):
                 group = m.group(1) if m.groups() else None
                 confirmed = self._is_confirmed(action, user_message)
+                if confirmed and action.strict_tokens and group is not None:
+                    confirmed = is_safe_token(group.strip())
                 matches.append(ActionMatch(
                     action=action, raw_match=m.group(0), group=group, confirmed=confirmed,
                 ))
@@ -113,8 +116,17 @@ class ActionGate:
 
     @staticmethod
     def _is_confirmed(action: ActionDefinition, user_message: str) -> bool:
+        """
+        Word-boundary matching, not substring matching. A naive
+        `kw in text` check would let confirm_keywords=["quit"] be falsely
+        triggered by "I am QUITe happy today" — "quit" is a substring of
+        "quite". \\b anchors ensure only whole-word matches count.
+        """
         text = (user_message or "").lower()
-        return any(kw in text for kw in action.confirm_keywords)
+        for kw in action.confirm_keywords:
+            if re.search(r"\b" + re.escape(kw.lower()) + r"\b", text):
+                return True
+        return False
 
 
 # Safe characters for a name extracted from a marker, if it's then passed to
