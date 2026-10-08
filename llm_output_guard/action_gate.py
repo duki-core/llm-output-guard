@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from ._confirmation import is_confirmed_by_keywords
 
 @dataclass
 class ActionDefinition:
@@ -116,17 +117,8 @@ class ActionGate:
 
     @staticmethod
     def _is_confirmed(action: ActionDefinition, user_message: str) -> bool:
-        """
-        Word-boundary matching, not substring matching. A naive
-        `kw in text` check would let confirm_keywords=["quit"] be falsely
-        triggered by "I am QUITe happy today" — "quit" is a substring of
-        "quite". \\b anchors ensure only whole-word matches count.
-        """
-        text = (user_message or "").lower()
-        for kw in action.confirm_keywords:
-            if re.search(r"\b" + re.escape(kw.lower()) + r"\b", text):
-                return True
-        return False
+        """Delegates to the shared word-boundary confirmation helper."""
+        return is_confirmed_by_keywords(user_message, action.confirm_keywords)
 
 
 # Safe characters for a name extracted from a marker, if it's then passed to

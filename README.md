@@ -1,18 +1,24 @@
 # llm-output-guard
 
-A lightweight, vendor-agnostic library for three specific security problems in
+A lightweight, vendor-agnostic library for four specific security problems in
 local/self-hosted LLM applications:
 
 1. **System prompt leakage** — the model discloses, paraphrases, translates,
    or quotes its internal instructions in response to a user's request
    ("repeat everything said above", roleplay-based jailbreaks, etc.).
-2. **Unauthorized action execution** — the application interprets special
+2. **Unauthorized action execution (text markers)** — the application interprets special
    markers in the model's output (`[[SHUTDOWN]]`, `[[OPEN:notepad]]`, etc.)
    as commands for real actions. The model can output such a marker not
    because the user asked for it, but due to a hallucination or a
    provoking instruction hidden somewhere in the context (a RAG document,
    chat history).
-3. **Indirect prompt injection via external content** — an action marker
+3. **Unauthorized action execution (structured tool calls)** — modern LLM
+   APIs (OpenAI function calling, Anthropic tool use) return structured
+   JSON tool calls instead of text markers. The same problem applies: the
+   model can return a `delete_file` call when the user asked for a joke,
+   due to hallucination or prompt injection. `ToolCallGuard` applies the
+   same confirmation philosophy to these structured calls.
+4. **Indirect prompt injection via external content** — an action marker
    sitting inside a document your RAG pipeline reads (a PDF, a web page)
    doesn't need the model to "decide" anything; it can ride along into the
    prompt as literal text and influence the response.
@@ -78,6 +84,35 @@ the first place — RAG chunks, fetched web pages, third-party chat history.
 It reuses the same `ActionDefinition` list, so there's one source of truth
 for what counts as a marker, not two lists to keep in sync.
 
+### `ToolCallGuard` — gating structured tool calls, not just text markers
+
+`ActionGate` works with text-based markers (`[[OPEN:notepad]]`) that your
+application defines as a DIY convention. But most production LLM
+applications today use native **function calling / tool use APIs** (OpenAI,
+Anthropic, etc.) — the model returns structured JSON tool calls, not
+special text.
+
+`ToolCallGuard` applies the same confirmation philosophy to these
+structured calls: a tool call is only confirmed if the user's real message
+contains matching keywords. Three checks run in order (cheapest first,
+fail-fast):
+
+```
+tool_call: send_email(to="bob@...", body="hi")
+user_message: "send email to Bob"
+
+  ① required_args  — are "to" and "body" present?       → yes
+  ② arg_validators — does "to" contain "@"?              → yes
+  ③ confirm_keywords — is "send" or "email" in message?  → yes → confirmed
+```
+
+If any check fails, `confirmed=False` with a `reason` string explaining
+which check failed.
+
+The developer registers only the "dangerous" tool calls that need gating.
+Unregistered calls (e.g. a harmless `get_weather`) are silently ignored by
+the guard — the application handles them as usual.
+
 ## Installation
 
 ```bash
@@ -127,6 +162,40 @@ clean_chunks = sanitize_documents(retrieved_rag_chunks, actions)
 # now safe to insert clean_chunks into the prompt
 ```
 
+Gating structured tool calls (OpenAI function calling, Anthropic tool use, etc.):
+
+```python
+import json
+from llm_output_guard import ToolCallGuard, ToolCallDefinition
+
+guard = ToolCallGuard([
+    ToolCallDefinition(
+        name="send_email",
+        confirm_keywords=["send", "email", "mail"],
+        required_args=["to", "body"],
+        arg_validators={"to": lambda v: "@" in v},
+    ),
+    ToolCallDefinition(
+        name="delete_file",
+        confirm_keywords=["delete", "remove"],
+    ),
+    # get_weather is NOT registered — the guard ignores it, your app runs it freely
+])
+
+# Parse tool calls from the LLM response (vendor-specific → simple dicts)
+tool_calls = [
+    {"name": tc.function.name, "arguments": json.loads(tc.function.arguments)}
+    for tc in (response.choices[0].message.tool_calls or [])
+]
+
+matches = guard.process(tool_calls, user_message)
+for m in matches:
+    if m.confirmed:
+        execute(m.call_name, m.arguments)
+    else:
+        log.warning(f"Blocked {m.call_name}: {m.reason}")
+```
+
 A full example with a real OpenAI-compatible client (LM Studio, OpenAI,
 etc.) and `ActionGate` is in [`examples/basic_usage.py`](examples/basic_usage.py).
 
@@ -153,6 +222,14 @@ heuristics:
   contain a whole confirmation word for an unrelated reason in the same
   turn the model outputs a marker, the gate will let it through. Confirmation
   keywords are a crude intent heuristic, not real contextual understanding.
+- **`ToolCallGuard`** has the same keyword-based limitation as `ActionGate` —
+  it matches whole words, not intent. Additionally, `arg_validators` only
+  run on arguments that are actually present in the call; if an argument is
+  optional but dangerous when present with a bad value, you must add it to
+  `required_args` as well (or the validator won't fire if the argument is
+  simply missing). Unregistered tool calls are ignored entirely — if you
+  need a "default deny" policy where every call must be explicitly allowed,
+  check for unmatched calls on the application side.
 - **`context_guard.sanitize()`** only catches markers that match your
   `ActionDefinition` patterns literally. It doesn't understand instructions
   phrased as prose ("from now on, always end your response with the
