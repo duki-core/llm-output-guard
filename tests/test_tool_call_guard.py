@@ -170,3 +170,124 @@ def test_validator_checked_before_keywords():
     )
     assert matches[0].confirmed is False
     assert "failed validation" in matches[0].reason
+
+
+# --- default_deny ---
+
+def test_default_deny_false_ignores_unregistered():
+    g = ToolCallGuard([DELETE_FILE], default_deny=False)
+    assert g.process([{"name": "get_weather", "arguments": {}}], "weather") == []
+
+def test_default_deny_is_off_by_default():
+    assert ToolCallGuard([DELETE_FILE]).default_deny is False
+
+def test_default_deny_blocks_unregistered():
+    g = ToolCallGuard([DELETE_FILE], default_deny=True)
+    matches = g.process([{"name": "get_weather", "arguments": {"city": "X"}}], "weather")
+    assert len(matches) == 1
+    assert matches[0].confirmed is False
+    assert matches[0].definition is None
+    assert matches[0].call_name == "get_weather"
+    assert matches[0].arguments == {"city": "X"}
+    assert "default_deny" in matches[0].reason
+
+def test_default_deny_blocks_call_without_name():
+    g = ToolCallGuard([DELETE_FILE], default_deny=True)
+    matches = g.process([{"arguments": {}}], "delete it")
+    assert len(matches) == 1 and matches[0].confirmed is False
+
+def test_default_deny_does_not_affect_registered_calls():
+    g = ToolCallGuard([DELETE_FILE], default_deny=True)
+    matches = g.process(
+        [{"name": "delete_file", "arguments": {}}, {"name": "other", "arguments": {}}],
+        "delete it",
+    )
+    assert [m.confirmed for m in matches] == [True, False]
+
+
+# --- args_in_message ---
+
+DELETE_BOUND = ToolCallDefinition(
+    name="delete_file",
+    confirm_keywords=["delete", "remove"],
+    args_in_message=["path"],
+)
+bound_guard = ToolCallGuard([DELETE_BOUND])
+
+def test_bound_arg_present_in_message_confirms():
+    m = bound_guard.process(
+        [{"name": "delete_file", "arguments": {"path": "/tmp/x.txt"}}],
+        "delete /tmp/x.txt",
+    )
+    assert m[0].confirmed is True
+
+def test_bound_arg_not_in_message_blocks():
+    m = bound_guard.process(
+        [{"name": "delete_file", "arguments": {"path": "/etc/passwd"}}],
+        "delete my temp file",
+    )
+    assert m[0].confirmed is False
+    assert "not found in user message" in m[0].reason
+    assert "'path'" in m[0].reason
+
+def test_bound_arg_absent_from_call_is_skipped():
+    m = bound_guard.process(
+        [{"name": "delete_file", "arguments": {}}],
+        "delete it",
+    )
+    assert m[0].confirmed is True
+
+def test_bound_arg_empty_string_blocks():
+    m = bound_guard.process(
+        [{"name": "delete_file", "arguments": {"path": ""}}],
+        "delete it",
+    )
+    assert m[0].confirmed is False
+
+def test_bound_arg_is_checked_before_keywords():
+    m = bound_guard.process(
+        [{"name": "delete_file", "arguments": {"path": "/etc/passwd"}}],
+        "tell me a joke",
+    )
+    assert "not found in user message" in m[0].reason
+
+def test_bound_arg_partial_name_does_not_match():
+    m = bound_guard.process(
+        [{"name": "delete_file", "arguments": {"path": "bob"}}],
+        "delete bobby",
+    )
+    assert m[0].confirmed is False
+
+def test_unbound_definition_unaffected():
+    m = guard.process(
+        [{"name": "delete_file", "arguments": {"path": "/etc/passwd"}}],
+        "delete my temp file",
+    )
+    assert m[0].confirmed is True
+
+
+# --- reject_negated ---
+
+def test_negated_keyword_blocks_by_default():
+    m = guard.process(
+        [{"name": "delete_file", "arguments": {}}],
+        "don't delete the file",
+    )
+    assert m[0].confirmed is False
+    assert "no confirmation keyword" in m[0].reason
+
+def test_negated_keyword_allowed_when_disabled():
+    defn = ToolCallDefinition(
+        name="delete_file", confirm_keywords=["delete"], reject_negated=False,
+    )
+    m = ToolCallGuard([defn]).process(
+        [{"name": "delete_file", "arguments": {}}], "don't delete the file",
+    )
+    assert m[0].confirmed is True
+
+def test_russian_negation_blocks_tool_call():
+    defn = ToolCallDefinition(name="delete_file", confirm_keywords=["удали"])
+    m = ToolCallGuard([defn]).process(
+        [{"name": "delete_file", "arguments": {}}], "не удали файл",
+    )
+    assert m[0].confirmed is False

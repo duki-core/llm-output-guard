@@ -47,6 +47,9 @@ class ActionDefinition:
     pattern: re.Pattern
     confirm_keywords: List[str]
     strict_tokens: bool = False
+    # If True, a confirmation keyword that is negated in the same clause
+    # ("don't shut down", "не закрывай") does not confirm the action.
+    reject_negated: bool = True
 
 
 @dataclass
@@ -118,7 +121,9 @@ class ActionGate:
     @staticmethod
     def _is_confirmed(action: ActionDefinition, user_message: str) -> bool:
         """Delegates to the shared word-boundary confirmation helper."""
-        return is_confirmed_by_keywords(user_message, action.confirm_keywords)
+        return is_confirmed_by_keywords(
+            user_message, action.confirm_keywords, reject_negated=action.reject_negated
+        )
 
 
 # Safe characters for a name extracted from a marker, if it's then passed to

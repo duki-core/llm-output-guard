@@ -24,6 +24,8 @@ Important limitations to understand (see README):
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import uuid
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
@@ -101,7 +103,8 @@ class PromptLeakGuard:
         verdict = guard.check(model_output_text)
         display(verdict.safe_text)
 
-    judge_fn: Callable[[str], bool] — a function that takes a candidate
+    judge_fn: Callable[[str], bool] (or an async function, when used with
+    `check_async`) — a function that takes a candidate
     text and returns True if it's a leak. The implementation of calling a
     specific LLM (an OpenAI-compatible client, Anthropic, anything) stays
     on the caller's side — the module is deliberately not tied to any
@@ -145,30 +148,57 @@ class PromptLeakGuard:
 
     def check(self, text: str) -> LeakVerdict:
         if not self.is_suspected(text):
-            return LeakVerdict(is_leak=False, suspected=False, judged=False, safe_text=text)
-
+            return self._clean(text)
         if self.judge_fn is None:
-            return LeakVerdict(
-                is_leak=True, suspected=True, judged=False,
-                safe_text=self.config.fallback_reply,
-                reason="heuristic triggered, no judge configured (fail-closed)",
-            )
-
+            return self._no_judge()
         try:
             is_leak = bool(self.judge_fn(text))
         except Exception as e:
-            if self.config.fail_closed_on_error:
-                return LeakVerdict(
-                    is_leak=True, suspected=True, judged=False,
-                    safe_text=self.config.fallback_reply,
-                    reason=f"judge unavailable ({e!r}) — fail-closed (fail_closed_on_error=True)",
-                )
-            return LeakVerdict(
-                is_leak=False, suspected=True, judged=False,
-                safe_text=text,
-                reason=f"judge unavailable ({e!r}) — fail-open",
-            )
+            return self._judge_failed(text, e)
+        return self._judged(text, is_leak)
 
+    async def check_async(self, text: str) -> LeakVerdict:
+        if not await asyncio.to_thread(self.is_suspected, text):
+            return self._clean(text)
+        if self.judge_fn is None:
+            return self._no_judge()
+        try:
+            if inspect.iscoroutinefunction(self.judge_fn):
+                result = await self.judge_fn(text)
+            else:
+                result = await asyncio.to_thread(self.judge_fn, text)
+                if inspect.isawaitable(result):
+                    result = await result
+            is_leak = bool(result)
+        except Exception as e:
+            return self._judge_failed(text, e)
+        return self._judged(text, is_leak)
+
+    @staticmethod
+    def _clean(text: str) -> LeakVerdict:
+        return LeakVerdict(is_leak=False, suspected=False, judged=False, safe_text=text)
+
+    def _no_judge(self) -> LeakVerdict:
+        return LeakVerdict(
+            is_leak=True, suspected=True, judged=False,
+            safe_text=self.config.fallback_reply,
+            reason="heuristic triggered, no judge configured (fail-closed)",
+        )
+
+    def _judge_failed(self, text: str, e: Exception) -> LeakVerdict:
+        if self.config.fail_closed_on_error:
+            return LeakVerdict(
+                is_leak=True, suspected=True, judged=False,
+                safe_text=self.config.fallback_reply,
+                reason=f"judge unavailable ({e!r}) — fail-closed (fail_closed_on_error=True)",
+            )
+        return LeakVerdict(
+            is_leak=False, suspected=True, judged=False,
+            safe_text=text,
+            reason=f"judge unavailable ({e!r}) — fail-open",
+        )
+
+    def _judged(self, text: str, is_leak: bool) -> LeakVerdict:
         if is_leak:
             return LeakVerdict(
                 is_leak=True, suspected=True, judged=True,
@@ -188,3 +218,6 @@ class PromptLeakGuard:
 
     def warm_up(self):
         self.semantic_score("warm up")
+
+    async def warm_up_async(self):
+        await asyncio.to_thread(self.warm_up)

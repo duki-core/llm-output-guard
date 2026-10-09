@@ -94,24 +94,189 @@ special text.
 
 `ToolCallGuard` applies the same confirmation philosophy to these
 structured calls: a tool call is only confirmed if the user's real message
-contains matching keywords. Three checks run in order (cheapest first,
+contains matching keywords. Four checks run in order (cheapest first,
 fail-fast):
 
 ```
-tool_call: send_email(to="bob@...", body="hi")
-user_message: "send email to Bob"
+tool_call: send_email(to="bob@example.com", body="hi")
+user_message: "send email to bob@example.com"
 
-  ① required_args  — are "to" and "body" present?       → yes
-  ② arg_validators — does "to" contain "@"?              → yes
-  ③ confirm_keywords — is "send" or "email" in message?  → yes → confirmed
+  ① required_args    — are "to" and "body" present?               → yes
+  ② arg_validators   — does "to" contain "@"?                      → yes
+  ③ args_in_message  — does "bob@example.com" appear in message?   → yes
+  ④ confirm_keywords — is "send" or "email" in message (and not
+                       negated)?                                   → yes → confirmed
 ```
+
+Checks ③ (and the negation part of ④) are opt-out/opt-in per definition — see
+the two sections below.
 
 If any check fails, `confirmed=False` with a `reason` string explaining
 which check failed.
 
 The developer registers only the "dangerous" tool calls that need gating.
-Unregistered calls (e.g. a harmless `get_weather`) are silently ignored by
-the guard — the application handles them as usual.
+By default (`default_deny=False`) unregistered calls (e.g. a harmless
+`get_weather`) are silently ignored by the guard — the application handles
+them as usual.
+
+### `default_deny` — allowlist mode for tool calls
+
+By default `ToolCallGuard` only looks at tools you registered; everything
+else passes through untouched. That is convenient, but it means a
+hallucinated or injected call to a tool you forgot about (`run_shell`,
+`transfer_money`, ...) is never seen by the guard.
+
+`default_deny=True` flips this into an allowlist: **every** tool call must be
+registered, otherwise it is blocked.
+
+| | `default_deny=False` (default) | `default_deny=True` |
+|---|---|---|
+| Registered tool call | checked (args, validators, keywords) | checked (same) |
+| Unregistered tool call | ignored, not in `process()` result | returned with `confirmed=False` |
+| Call without a `name` | ignored | returned with `confirmed=False` |
+
+For a blocked unregistered call the `ToolCallMatch` has
+`definition=None` and `reason="tool not registered (default_deny)"`.
+
+```python
+guard = ToolCallGuard(
+    [
+        ToolCallDefinition(name="delete_file", confirm_keywords=["delete", "remove"]),
+        # harmless tools must be registered too, otherwise they get blocked.
+        # An empty confirm_keywords list would block them (nothing can confirm),
+        # so use keywords that match how users actually ask for them:
+        ToolCallDefinition(name="get_weather", confirm_keywords=["weather", "forecast"]),
+    ],
+    default_deny=True,
+)
+
+matches = guard.process(tool_calls, user_message)
+for m in matches:
+    if m.confirmed:
+        execute(m.call_name, m.arguments)
+    else:
+        log.warning(f"Blocked {m.call_name}: {m.reason}")
+```
+
+Note that with `default_deny=True`, `process()` returns an entry for
+**every** call that is not allowed, so "nothing in `matches`" now means
+"no tool calls at all", not "nothing needed gating".
+
+### `args_in_message` — the arguments must come from the user, not the model
+
+Keyword confirmation alone has a gap: the user says "delete my temp file",
+the model calls `delete_file(path="/etc/passwd")`, and the word "delete" is
+in the message, so the call is confirmed.
+
+`args_in_message` closes it: the listed arguments must literally appear in
+the user's real message (case-insensitive, whitespace-normalized, bounded by
+non-word characters — `bob` does not match `bobby`).
+
+```python
+ToolCallDefinition(
+    name="delete_file",
+    confirm_keywords=["delete", "remove"],
+    args_in_message=["path"],
+)
+
+# user: "delete /tmp/x.txt"   + delete_file(path="/tmp/x.txt")  -> confirmed
+# user: "delete my temp file" + delete_file(path="/etc/passwd") -> blocked:
+#       "argument 'path' not found in user message"
+```
+
+Details:
+- Only arguments that are **present** in the call are checked (use
+  `required_args` to demand presence).
+- A list/tuple value requires every element to appear. Empty strings, `None`
+  and dicts never match.
+- It is a *literal* match. If the user says "email Bob" and the model resolves
+  that to `bob@example.com`, the call is blocked. Use this for arguments that
+  users typically type verbatim (paths, ids, emails, URLs); don't use it for
+  arguments the model is expected to derive or rephrase (e.g. a generated
+  email body or search query).
+
+### Built-in validators for `arg_validators`
+
+Common checks so you don't hand-roll them (and get them subtly wrong):
+
+```python
+from llm_output_guard import (
+    ToolCallDefinition, is_safe_path, is_allowed_domain, max_len, one_of,
+)
+
+ToolCallDefinition(
+    name="read_file",
+    confirm_keywords=["read", "open"],
+    required_args=["path"],
+    arg_validators={"path": is_safe_path("/srv/app/files")},
+    args_in_message=["path"],
+)
+
+ToolCallDefinition(
+    name="fetch_url",
+    confirm_keywords=["fetch", "open", "download"],
+    required_args=["url"],
+    arg_validators={"url": is_allowed_domain(["example.com", "docs.python.org"])},
+)
+```
+
+| Validator | Accepts |
+|---|---|
+| `is_safe_path(base_dir, allow_base=False)` | a path that stays inside `base_dir` after resolving `..` and symlinks; blocks absolute paths outside it, empty strings, null bytes, and (by default) `base_dir` itself |
+| `is_allowed_domain(domains, allow_subdomains=True, schemes=("https",))` | a URL whose real host is in `domains`; rejects look-alikes (`notexample.com`, `example.com.evil.com`), `user@host` tricks and non-listed schemes |
+| `max_len(n)` | a string of at most `n` characters |
+| `one_of(*values)` | exactly one of the given values (`True` is not `1`) |
+
+Validators never raise: a wrong type or malformed value is just "invalid".
+Combine them with `args_in_message` — the validator says the value is
+*allowed*, `args_in_message` says the *user asked for it*.
+
+### Negation — "don't delete it" is not a confirmation
+
+Previously the word "delete" in "please don't delete the file" confirmed the
+action. Now, for both `ToolCallGuard` and `ActionGate`, a confirmation
+keyword with a negator in the 3 words before it **within the same clause** is
+ignored (English: `not`, `don't`, `never`, `no`, `without`, ...; Russian:
+`не`, `ни`, `нельзя`, `без`, ...). Clauses end at punctuation and at
+`but` / `но` / `а`:
+
+```
+"don't delete the file"              -> not confirmed
+"не удали файл"                      -> not confirmed
+"I don't know. Delete the file"      -> confirmed   (different clause)
+"don't open it but delete the file"  -> confirmed   ("but" starts a new clause)
+```
+
+A keyword confirms if at least one of its occurrences is not negated. Turn it
+off per definition with `reject_negated=False` (on `ToolCallDefinition` or
+`ActionDefinition`).
+
+**Behavior change:** `reject_negated` is `True` by default, so messages like
+"don't forget to delete the file" are now (conservatively) *not* confirmed.
+This is deliberate for a security library — a false block costs the user one
+rephrase, a false confirm costs an unwanted action.
+
+### Async usage
+
+`PromptLeakGuard.check_async()` is the non-blocking twin of `check()` for
+FastAPI, aiogram and other asyncio apps:
+
+```python
+async def judge_fn(text: str) -> bool:          # async def is fine...
+    return await my_async_client.classify_is_leak(text)
+# ...and so is a regular blocking function — it runs in a worker thread.
+
+guard = PromptLeakGuard(judge_fn=judge_fn)
+await guard.warm_up_async()                     # once, at startup
+verdict = await guard.check_async(model_output_text)
+```
+
+The string and embedding layers run in a worker thread
+(`asyncio.to_thread`), so a blocking judge call or a slow embedding pass no
+longer freezes the event loop. Results are identical to `check()`.
+`ActionGate`, `ToolCallGuard` and `context_guard` are pure in-memory string
+operations that finish in microseconds, so they stay synchronous — just call
+them directly from async code.
 
 ## Installation
 
@@ -222,14 +387,23 @@ heuristics:
   contain a whole confirmation word for an unrelated reason in the same
   turn the model outputs a marker, the gate will let it through. Confirmation
   keywords are a crude intent heuristic, not real contextual understanding.
+- **Negation detection** is a small word-list heuristic (3-word window, same
+  clause), not language understanding. It errs on the side of blocking
+  ("don't forget to delete it" is not confirmed), supports English and
+  Russian only, and won't catch indirect phrasing ("I'd rather you left that
+  file alone, delete it"). Extend `_NEGATORS` in `_confirmation.py` for other
+  languages.
+- **`args_in_message`** only proves the argument text was typed by the user,
+  not that the user meant *this call* — it narrows the keyword heuristic, it
+  doesn't replace a confirmation dialog for irreversible actions.
 - **`ToolCallGuard`** has the same keyword-based limitation as `ActionGate` —
   it matches whole words, not intent. Additionally, `arg_validators` only
   run on arguments that are actually present in the call; if an argument is
   optional but dangerous when present with a bad value, you must add it to
   `required_args` as well (or the validator won't fire if the argument is
-  simply missing). Unregistered tool calls are ignored entirely — if you
-  need a "default deny" policy where every call must be explicitly allowed,
-  check for unmatched calls on the application side.
+  simply missing). Unregistered tool calls are ignored by default — set
+  `default_deny=True` if you want every call to be explicitly allowed
+  (unregistered calls are then returned as `confirmed=False`).
 - **`context_guard.sanitize()`** only catches markers that match your
   `ActionDefinition` patterns literally. It doesn't understand instructions
   phrased as prose ("from now on, always end your response with the
@@ -260,7 +434,7 @@ dialog) on top of this library — don't rely on it alone.
 
 ## Roadmap (not implemented yet)
 
-Two features came up as clearly valuable but were deliberately deferred
+One feature came up as clearly valuable but was deliberately deferred
 rather than bolted on quickly:
 
 - **Streaming support** — a wrapper that passes safe tokens through
@@ -268,9 +442,6 @@ rather than bolted on quickly:
   sees the start of a potential marker. Real UX value, but needs careful
   handling of markers split across token boundaries to avoid either false
   buffering on harmless text or missed markers.
-- **Async variants** (`async_check`, etc.) — `judge_fn`'s network call
-  currently blocks the event loop if called from async code (e.g. FastAPI,
-  aiogram). Straightforward in principle, just not done yet.
 
 ## License
 

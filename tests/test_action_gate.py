@@ -41,3 +41,17 @@ def test_is_safe_token():
     assert is_safe_token("notebook") is True
     assert is_safe_token("notepad && rm -rf /") is False
     assert is_safe_token("app; malicious") is False
+
+def test_negated_keyword_does_not_confirm_action():
+    _, matches = gate.process("Okay.\n[[SHUTDOWN]]", "please don't exit")
+    assert matches[0].confirmed is False
+
+def test_negation_can_be_disabled_per_action():
+    d = ActionDefinition(
+        name="shutdown",
+        pattern=re.compile(r"\[\[SHUTDOWN\]\]"),
+        confirm_keywords=["exit"],
+        reject_negated=False,
+    )
+    _, matches = ActionGate([d]).process("[[SHUTDOWN]]", "don't exit")
+    assert matches[0].confirmed is True
