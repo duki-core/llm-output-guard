@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-output-guard"
-version = "0.4.0"
+version = "0.5.0"
 description = "Multi-layer LLM output protection: system prompt leakage + unauthorized action markers"
 readme = "README.md"
 requires-python = ">=3.9"

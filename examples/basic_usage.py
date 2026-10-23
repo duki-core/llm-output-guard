@@ -2,8 +2,10 @@
 Example: wiring llm-output-guard into any OpenAI-compatible client
 (LM Studio, OpenAI, a local server, etc.).
 
-To run (needs a running LM Studio on localhost:1234 with any model loaded):
-    pip install -r ../requirements.txt
+To run (needs a running LM Studio on localhost:1234 with any model loaded,
+only for the judge call; the demo at the bottom works without it):
+    pip install -e ..            # from the examples/ folder
+    pip install openai
     python basic_usage.py
 """
 import re
